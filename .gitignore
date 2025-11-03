@@ -16,3 +16,7 @@ Cargo.lock
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+momo.log
+.momo.pid
