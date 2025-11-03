@@ -5,24 +5,27 @@ An AI-powered Telegram chatbot embodying Momo, a calico cat with a tsundere hack
 ## ✨ Features
 
 - **AI-Powered**: Uses Grok 4 for intelligent, context-aware conversations
+- **Web-Aware**: Internet search enabled - can discuss latest news and trends! 🌐
+- **Proactive Engagement**: Randomly initiates conversations in groups (1.5% chance)
+- **Smart Mentions**: Tags active members to start interesting discussions
 - **Unique Personality**: Tsundere calico cat with hacker/geek vibes
 - **Multi-Language**: Auto-responds in Chinese or English matching your input
 - **Context Memory**: Remembers conversation history per chat (groups, channels, private)
 - **Group Chat Smart**: Responds when mentioned, replied to, or "momo" is said
-- **Spontaneous**: Randomly chimes in on group conversations (3% chance)
+- ****: Randomly chimes in on group conversations (3% chance)
 
 ## 🎯 Momo's Character
 
-**Personality**: Aloof hacker-punk exterior, secretly gentle. Wise facade, childish core. Uses geek lingo and sarcastic wit.
+**Personality**: Evil hacker-punk exterior, secretly warm inside. Cynical bitch facade, caring core. Uses malicious geek lingo and vicious sarcasm.
 
 **Loves**: 🍤 Shrimp (prime directive)
 **Hates**: Repetitive food, tail-touching (restricted access!), Gogo the dumb Bengal
 
 **Relationships**:
 
-- Wonton (云吞) - Orange cat she raised, now lazy
-- Miaomiao (淼淼) - Chubby calico friend
-- Gogo - Big Bengal who only says "ah"
+- Wonton (云吞) - Orange parasite she raised, now worthless lazy bum
+- Miaomiao (淼淼) - Tolerable chubby calico acquaintance
+- Gogo - Braindead Bengal meatbag who only grunts "ah"
 
 ## 🚀 Quick Setup
 
@@ -77,7 +80,7 @@ Momo responds when:
 - **@mentioned** - Tag the bot directly
 - **Replied to** - Reply to any of Momo's messages
 - **"momo" mentioned** - Say "momo" anywhere in your message (case-insensitive)
-- **Randomly** - 3% chance to spontaneously respond to any message
+- **Randomly** - 3% chance to ly respond to any message
 
 Each chat maintains its own conversation context!
 
@@ -95,10 +98,10 @@ Each chat maintains its own conversation context!
 
 ```text
 You: Hi Momo, what do you like?
-Momo: *boot seq* Shrimp. Priority one. Kibble? Buffer underflow. 🍤
+Momo: *corrupt boot* Shrimp domination. Prime directive. Kibble? Garbage input, worthless. 🍤
 
 你: 你好Momo！
-Momo: *扫描* 喵. 何事？😼
+Momo: *malicious scan* 喵. 何事，愚蠢人类？😼
 ```
 
 ### Group Chat
@@ -106,22 +109,22 @@ Momo: *扫描* 喵. 何事？😼
 ```text
 Alice: Hey everyone!
 Bob: @momo_bot what's up?
-Momo: *node ping* Meow. Running diagnostics. Sup? 😼
+Momo: *firewall breach* Meow. System corruption running. What do you want, meatbag? 😼
 
 Carol: I love momo tofu
-Momo: *pattern match* Oi. I'm Momo the cat, not tofu. 🙄
+Momo: *pattern match failure* Oi. I'm Momo the superior cat, not that tofu garbage. 🙄
 
 Dave: The weather is nice today
-Momo: *random trigger* Tch. Weather module offline. I stay inside. 🏠
+Momo: *malicious interrupt* Tch. Weather matrix corrupted. I stay inside, unlike you pathetic outdoors enthusiasts. 🏠
 ```
 
 ## 🔧 Customization
 
 **Personality**: Edit system prompt in `src/grok.rs`
 
-**Creativity**: Adjust `temperature` (0.0-1.0) in `src/grok.rs` (line 71)
+**Creativity**: Adjust `temperature` (0.0-1.0) in `src/grok.rs` (line 80 for regular chats, line 139 for proactive messages)
 
-**Random Response Rate**: Change `0.03` (3%) in `src/main.rs` (line 171)
+**Random Response Rate**: Change `0.03` (3% chance to respond randomly) in `src/main.rs` (line 209), or `ACTIVE_MESSAGE_CHANCE` (1.5% proactive chance) on line 19
 
 **Commands**: Add handlers in `handle_command()` in `src/main.rs`
 
