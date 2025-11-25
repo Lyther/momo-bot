@@ -4,6 +4,7 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 use tokio::sync::Mutex;
 
+use crate::db::Database;
 use crate::grok::Message as GrokMessage;
 
 /// Conversation history storage: ChatId -> Messages
@@ -39,3 +40,6 @@ pub type ChatBots = HashMap<ChatId, Vec<(UserId, String)>>;
 
 /// Thread-safe shared bot tracking
 pub type SharedChatBots = Arc<Mutex<ChatBots>>;
+
+/// Shared database handle
+pub type SharedDb = Arc<Database>;

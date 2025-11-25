@@ -17,6 +17,10 @@ pub const MAX_RECENT_MESSAGES: usize = 120;
 
 /// Number of messages from the group timeline to inject as extra context
 pub const GROUP_CONTEXT_MESSAGES: usize = 40;
+/// Number of DB summaries to include for long-term context
+pub const DB_CONTEXT_SUMMARIES: usize = 24;
+/// Limit how many media attachments we ever forward to the LLM per message
+pub const MAX_MEDIA_ATTACHMENTS: usize = 1;
 
 /// Minimum active members required before proactive engagement
 pub const MIN_MEMBERS_FOR_PROACTIVE: usize = 3;
@@ -53,6 +57,8 @@ pub const PROACTIVE_BLOCK_COOLDOWN_SECS: u64 = 3600; // 1 hour
 
 /// Chance to pounce on "cat bait" keywords like shrimp or treats
 pub const CAT_BAIT_RESPONSE_CHANCE: f64 = 0.2;
+/// Chance to send a sticker along with a text reply if we have one stored
+pub const STICKER_REPLY_CHANCE: f64 = 0.15;
 
 /// Grok API configuration
 pub const GROK_API_URL: &str = "https://api.x.ai/v1/chat/completions";

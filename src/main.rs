@@ -3,9 +3,12 @@
 mod chat;
 mod commands;
 mod config;
+mod db;
 mod grok;
+mod media;
 mod members;
 mod prompts;
+mod server;
 mod state;
 mod tracking;
 mod types;
@@ -21,7 +24,7 @@ use tokio::time::sleep;
 
 use grok::GrokClient;
 use state::SharedChatStates;
-use types::{SharedActiveMembers, SharedChatBots, SharedHistory, SharedRecentMessages};
+use types::{SharedActiveMembers, SharedChatBots, SharedDb, SharedHistory, SharedRecentMessages};
 
 #[tokio::main]
 async fn main() {
@@ -39,6 +42,10 @@ async fn main() {
         grok_client.search_enabled(),
         grok_client.allows_multimodal()
     );
+    let db_path = env::var("MOMO_DB_PATH").unwrap_or_else(|_| "momo.db".to_string());
+    let db = Arc::new(db::Database::new(&db_path).await.unwrap_or_else(|e| {
+        panic!("Failed to open database at {}: {}", db_path, e);
+    }));
     let conversation_history: SharedHistory = Arc::new(Mutex::new(HashMap::new()));
     let active_members: SharedActiveMembers = Arc::new(Mutex::new(HashMap::new()));
     let recent_messages: SharedRecentMessages = Arc::new(Mutex::new(HashMap::new()));
@@ -51,6 +58,22 @@ async fn main() {
         "🤖 *Grok core loaded* Momo online. Enhanced proactive mode active. Ping if you dare."
     );
 
+    // Start HTTP server to serve cached images with correct content-types
+    // Grok downloads from URLs, and Telegram serves everything as application/octet-stream
+    tokio::spawn(async move {
+        if let Err(e) = server::start_server().await {
+            log::error!("*image server error*: {}", e);
+        }
+    });
+
+    // Clean up orphaned cache files
+    if let Err(e) = db
+        .cleanup_orphaned_cache(std::path::Path::new("assets/cache/images"))
+        .await
+    {
+        log::warn!("*cache cleanup failed*: {}", e);
+    }
+
     // METHOD 1: Robust error handling with automatic reconnection
     run_with_retry(
         bot,
@@ -60,6 +83,7 @@ async fn main() {
         recent_messages,
         chat_bots,
         chat_states,
+        db,
     )
     .await;
 }
@@ -73,6 +97,7 @@ async fn run_with_retry(
     recent_messages: SharedRecentMessages,
     chat_bots: SharedChatBots,
     chat_states: SharedChatStates,
+    db: SharedDb,
 ) {
     let mut retry_count = 0u32;
     let max_retry_delay = Duration::from_secs(300); // 5 minutes max
@@ -92,6 +117,7 @@ async fn run_with_retry(
             recent_messages.clone(),
             chat_bots.clone(),
             chat_states.clone(),
+            db.clone(),
         )
         .await;
 
@@ -127,6 +153,7 @@ async fn run_bot_with_dispatcher(
     recent_messages: SharedRecentMessages,
     chat_bots: SharedChatBots,
     chat_states: SharedChatStates,
+    db: SharedDb,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Use Dispatcher with update handler
     Dispatcher::builder(
@@ -138,6 +165,7 @@ async fn run_bot_with_dispatcher(
             let recent_messages = recent_messages.clone();
             let chat_bots = chat_bots.clone();
             let chat_states = chat_states.clone();
+            let db = db.clone();
 
             async move {
                 chat::handle_message(
@@ -149,6 +177,7 @@ async fn run_bot_with_dispatcher(
                     recent_messages,
                     chat_bots,
                     chat_states,
+                    db,
                 )
                 .await
             }

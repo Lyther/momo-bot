@@ -3,14 +3,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use teloxide::errors::{ApiError, RequestError};
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, Message, MessageId};
+use teloxide::types::{ChatAction, InputFile, Message, MessageId};
 
 use crate::commands::handle_command;
 use crate::config::{
-    ACTIVE_MESSAGE_CHANCE, CAT_BAIT_RESPONSE_CHANCE, GROUP_CONTEXT_MESSAGES,
-    MAX_CONVERSATION_HISTORY, PROACTIVE_BLOCK_COOLDOWN_SECS,
+    ACTIVE_MESSAGE_CHANCE, CAT_BAIT_RESPONSE_CHANCE, DB_CONTEXT_SUMMARIES, GROUP_CONTEXT_MESSAGES,
+    MAX_CONVERSATION_HISTORY, MAX_MEDIA_ATTACHMENTS, PROACTIVE_BLOCK_COOLDOWN_SECS,
+    STICKER_REPLY_CHANCE,
 };
+use crate::db::{Database, DbEntry};
 use crate::grok::{Content, ContentPart, GrokClient, ImageUrl, Message as GrokMessage};
+use crate::media::to_data_url;
 use crate::members::track_active_member;
 use crate::prompts::{CAT_BAIT_RESPONSES, ERROR_RESPONSES};
 use crate::state::{
@@ -18,7 +21,9 @@ use crate::state::{
     SharedChatStates,
 };
 use crate::tracking::{get_recent_context, track_bot, track_message};
-use crate::types::{SharedActiveMembers, SharedChatBots, SharedHistory, SharedRecentMessages};
+use crate::types::{
+    SharedActiveMembers, SharedChatBots, SharedDb, SharedHistory, SharedRecentMessages,
+};
 use crate::utils::{is_group_or_channel, random_choice};
 
 use super::active::generate_proactive_message;
@@ -34,13 +39,15 @@ pub async fn handle_message(
     recent_messages: SharedRecentMessages,
     chat_bots: SharedChatBots,
     chat_states: SharedChatStates,
+    db: SharedDb,
 ) -> ResponseResult<()> {
     let allow_multimodal = grok_client.allows_multimodal();
 
-    let (text, attachments) = match extract_text_and_media(&bot, &msg, allow_multimodal).await {
-        Some(value) => value,
-        None => return Ok(()),
-    };
+    let (text, current_media) =
+        match extract_text_and_media(&bot, &msg, allow_multimodal, true, &db).await {
+            Some(value) => value,
+            None => return Ok(()),
+        };
 
     let chat_id = msg.chat.id;
 
@@ -59,6 +66,70 @@ pub async fn handle_message(
         } else {
             // Track active human members
             track_active_member(active_members.clone(), chat_id, user).await;
+        }
+    }
+
+    // Gather reply context if present
+    let reply_context = if let Some(reply) = msg.reply_to_message() {
+        extract_text_and_media(&bot, reply, allow_multimodal, true, &db).await
+    } else {
+        None
+    };
+    let reply_summary = reply_context.as_ref().and_then(|(t, media)| {
+        format_reply_summary(reply_to_username(&msg), t, media.summary.as_deref())
+    });
+
+    // Combine attachments: include both reply context and current message
+    let mut attachments = Vec::new();
+    let mut attachment_file_ids = Vec::new();
+
+    // Include reply context attachments first (higher priority)
+    if let Some((_, reply_media)) = &reply_context {
+        attachments.extend(reply_media.attachments.clone());
+        attachment_file_ids.extend(reply_media.attachment_file_ids.clone());
+    }
+
+    // Then current message attachments
+    attachments.extend(current_media.attachments.clone());
+    attachment_file_ids.extend(current_media.attachment_file_ids.clone());
+
+    if attachments.len() > MAX_MEDIA_ATTACHMENTS {
+        attachments.truncate(MAX_MEDIA_ATTACHMENTS);
+        attachment_file_ids.truncate(MAX_MEDIA_ATTACHMENTS);
+    }
+
+    log::debug!(
+        "*media context* current: {} attachments, reply: {} attachments, total: {}",
+        current_media.attachments.len(),
+        reply_context
+            .as_ref()
+            .map(|(_, m)| m.attachments.len())
+            .unwrap_or(0),
+        attachments.len()
+    );
+
+    // Compose user text with reply hint for the model
+    let mut composed_text = text.clone();
+    if let Some(ref summary) = reply_summary {
+        composed_text.push_str(&format!("\n\n[replying to {}]", summary));
+    }
+
+    // Persist to DB
+    if let Some(user) = msg.from() {
+        let username = format_username(user);
+        let summary = build_db_summary(&username, &text, reply_summary.as_deref(), &current_media);
+        let entry = DbEntry {
+            chat_id: chat_id.0,
+            message_id: msg.id.0,
+            user_id: user.id.0 as i64,
+            username,
+            text: text.clone(),
+            media_type: current_media.media_type.clone(),
+            media_ref: current_media.media_ref.clone(),
+            summary,
+        };
+        if let Err(err) = db.log_message(entry).await {
+            log::warn!("*db log failed* chat {} msg {}: {}", chat_id, msg.id.0, err);
         }
     }
 
@@ -137,6 +208,7 @@ pub async fn handle_message(
                 handle_send_error(chat_id, &err, &chat_states).await;
             } else {
                 clear_proactive_block(&chat_states, chat_id).await;
+                maybe_send_sticker_reply(&bot, chat_id, db.as_ref(), &chat_states).await;
             }
         }
         return Ok(());
@@ -184,7 +256,7 @@ pub async fn handle_message(
     }
 
     // Handle regular conversation with Grok
-    log::info!("*packet received* from chat {}: {}", chat_id, text);
+    log::info!("*packet received* from chat {}: {}", chat_id, composed_text);
 
     // Send typing action
     if let Err(err) = bot.send_chat_action(chat_id, ChatAction::Typing).await {
@@ -193,11 +265,25 @@ pub async fn handle_message(
 
     // Get or create conversation history for this chat
     let user_content = if allow_multimodal && !attachments.is_empty() {
-        let mut parts = vec![ContentPart::Text { text: text.clone() }];
-        parts.extend(attachments);
+        // Build content with text and images
+        let mut parts = vec![ContentPart::Text {
+            text: composed_text.clone(),
+        }];
+
+        // Include all attachments (reply context + current message, already deduplicated)
+        for attachment in &attachments {
+            parts.push(attachment.clone());
+        }
+
+        log::info!(
+            "*multimodal request* {} text parts, {} image parts",
+            1,
+            attachments.len()
+        );
+
         Content::Parts(parts)
     } else {
-        Content::Text(text.clone())
+        Content::Text(composed_text.clone())
     };
 
     let user_message = GrokMessage {
@@ -220,15 +306,21 @@ pub async fn handle_message(
         chat_history.clone()
     };
 
-    let context_hint = if is_group_or_channel(&msg.chat) {
-        let ctx = get_recent_context(&recent_messages, chat_id, GROUP_CONTEXT_MESSAGES).await;
-        if ctx.is_empty() {
-            None
-        } else {
-            Some(ctx)
+    let context_hint = {
+        let mut ctx_pieces = Vec::new();
+        if let Ok(db_ctx) = db.recent_summaries(chat_id.0, DB_CONTEXT_SUMMARIES).await {
+            if !db_ctx.is_empty() {
+                ctx_pieces.push(db_ctx.join("\n"));
+            }
         }
-    } else {
-        None
+        if is_group_or_channel(&msg.chat) {
+            let mem_ctx =
+                get_recent_context(&recent_messages, chat_id, GROUP_CONTEXT_MESSAGES).await;
+            if !mem_ctx.is_empty() {
+                ctx_pieces.push(mem_ctx);
+            }
+        }
+        (!ctx_pieces.is_empty()).then(|| ctx_pieces.join("\n"))
     };
 
     // Get response from Grok
@@ -254,6 +346,7 @@ pub async fn handle_message(
                 handle_send_error(chat_id, &err, &chat_states).await;
             } else {
                 clear_proactive_block(&chat_states, chat_id).await;
+                maybe_send_sticker_reply(&bot, chat_id, db.as_ref(), &chat_states).await;
             }
         }
         Err(e) => {
@@ -273,36 +366,60 @@ pub async fn handle_message(
     Ok(())
 }
 
-/// Pull user text/caption plus optional multimodal content (photos)
+#[derive(Clone, Default)]
+struct MediaCapture {
+    attachments: Vec<ContentPart>,
+    attachment_file_ids: Vec<String>, // Track file_ids for cache lookups
+    media_type: Option<String>,
+    media_ref: Option<String>,
+    summary: Option<String>,
+}
+
 async fn extract_text_and_media(
     bot: &Bot,
     msg: &Message,
     allow_multimodal: bool,
-) -> Option<(String, Vec<ContentPart>)> {
-    let mut attachments: Vec<ContentPart> = Vec::new();
+    allow_media: bool,
+    db: &Database,
+) -> Option<(String, MediaCapture)> {
+    let mut media = MediaCapture::default();
+    let sender = msg
+        .from()
+        .map(|u| format_username(u))
+        .unwrap_or_else(|| "someone".to_string());
 
-    if allow_multimodal {
-        if let Some(photos) = msg.photo() {
-            if let Some(best) = photos
-                .iter()
-                .max_by_key(|p| (p.height as u64) * (p.width as u64))
-            {
-                if let Ok(file) = bot.get_file(best.file.id.clone()).await {
-                    let url = format!(
-                        "https://api.telegram.org/file/bot{}/{}",
-                        bot.token(),
-                        file.path
-                    );
-                    attachments.push(ContentPart::ImageUrl {
-                        image_url: ImageUrl {
-                            url,
-                            detail: Some("high".to_string()),
-                        },
-                    });
-                } else {
-                    log::warn!("*photo fetch failed* Could not fetch file for image message");
+    if let Some(sticker) = msg.sticker() {
+        media.media_type = Some("sticker".to_string());
+        media.media_ref = Some(sticker.file.id.clone());
+        let emoji = sticker.emoji.clone().unwrap_or_else(|| "😼".to_string());
+        media.summary = Some(format!("sticker {} from @{}", emoji, sender));
+
+        let is_raster = !sticker.is_animated() && !sticker.is_video();
+        if allow_multimodal && allow_media && is_raster {
+            if let Some(part) = build_image_attachment(bot, &sticker.file.id, db).await {
+                media.attachment_file_ids.push(sticker.file.id.clone());
+                media.attachments.push(part);
+            }
+        }
+    } else if let Some(photos) = msg.photo() {
+        if let Some(best) = photos
+            .iter()
+            .max_by_key(|p| (p.height as u64) * (p.width as u64))
+        {
+            media.media_type = Some("photo".to_string());
+            media.media_ref = Some(best.file.id.clone());
+            if allow_multimodal && allow_media {
+                if let Some(part) = build_image_attachment(bot, &best.file.id, db).await {
+                    media.attachment_file_ids.push(best.file.id.clone());
+                    media.attachments.push(part);
                 }
             }
+            let caption = msg.caption().unwrap_or("");
+            media.summary = Some(if caption.is_empty() {
+                format!("photo from @{}", sender)
+            } else {
+                format!("photo from @{} (caption: {})", sender, caption)
+            });
         }
     }
 
@@ -311,17 +428,57 @@ async fn extract_text_and_media(
         .map(|t| t.to_string())
         .or_else(|| msg.caption().map(|c| c.to_string()))
         .or_else(|| {
-            if msg.photo().is_some() {
-                Some("User sent a photo".to_string())
+            if let Some(summary) = &media.summary {
+                Some(summary.clone())
             } else {
                 None
             }
         })?;
 
-    Some((text, attachments))
+    Some((text, media))
 }
 
-/// Determine if we should bypass mention checks because the message is baiting Momo
+async fn build_image_attachment(bot: &Bot, file_id: &str, db: &Database) -> Option<ContentPart> {
+    // Check cache first
+    if let Ok(Some(cached)) = db.get_cached_image(file_id).await {
+        log::debug!("*image cache hit* file_id: {}", file_id);
+        return Some(ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: cached.data_url,
+                detail: Some("high".to_string()),
+            },
+        });
+    }
+
+    // Download and convert to data URL
+    let (mime_type, data_url) = match to_data_url(bot, file_id).await {
+        Some(result) => result,
+        None => {
+            log::warn!("*image conversion failed* file_id: {}", file_id);
+            return None;
+        }
+    };
+
+    // Cache the result
+    if let Err(e) = db.cache_image(file_id, &mime_type, &data_url).await {
+        log::warn!("*cache write failed* file_id: {}: {}", file_id, e);
+    }
+
+    log::info!(
+        "*image processed* file_id: {}, mime: {}, data_url_prefix: {}...",
+        file_id,
+        mime_type,
+        &data_url[..data_url.len().min(60)]
+    );
+
+    Some(ContentPart::ImageUrl {
+        image_url: ImageUrl {
+            url: data_url,
+            detail: Some("high".to_string()),
+        },
+    })
+}
+
 fn contains_cat_bait(text: &str) -> bool {
     let lower = text.to_lowercase();
     let bait_keywords = [
@@ -338,7 +495,6 @@ fn contains_cat_bait(text: &str) -> bool {
     })
 }
 
-/// Decide whether a Telegram error means the bot is not allowed to send proactively
 fn should_pause_proactive(err: &RequestError) -> bool {
     match err {
         RequestError::Api(api_err) => {
@@ -363,7 +519,6 @@ fn should_pause_proactive(err: &RequestError) -> bool {
     }
 }
 
-/// Centralized handler for message send failures to keep the bot alive and respectful of Telegram rules
 async fn handle_send_error(chat_id: ChatId, err: &RequestError, chat_states: &SharedChatStates) {
     if let RequestError::RetryAfter(delay) = err {
         log::warn!("*rate limited* chat {}: retry after {:?}", chat_id, delay);
@@ -378,5 +533,96 @@ async fn handle_send_error(chat_id: ChatId, err: &RequestError, chat_states: &Sh
             chat_id,
             cooldown.as_secs()
         );
+    }
+}
+
+fn format_username(user: &teloxide::types::User) -> String {
+    user.username
+        .clone()
+        .unwrap_or_else(|| user.first_name.clone())
+}
+
+fn reply_to_username(msg: &Message) -> Option<String> {
+    msg.reply_to_message()
+        .and_then(|m| m.from())
+        .map(|u| format_username(u))
+}
+
+fn format_reply_summary(
+    reply_user: Option<String>,
+    text: &str,
+    media_summary: Option<&str>,
+) -> Option<String> {
+    let who = reply_user.unwrap_or_else(|| "someone".to_string());
+    let snippet = truncate_for_context(text, 160);
+    if let Some(media) = media_summary {
+        Some(format!("@{}: {} ({})", who, snippet, media))
+    } else {
+        Some(format!("@{}: {}", who, snippet))
+    }
+}
+
+fn build_db_summary(
+    username: &str,
+    text: &str,
+    reply_summary: Option<&str>,
+    media: &MediaCapture,
+) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "@{}: {}",
+        username,
+        truncate_for_context(text, 180)
+    ));
+    if let Some(reply) = reply_summary {
+        parts.push(format!("[reply to {}]", reply));
+    }
+    if let Some(media_s) = &media.summary {
+        parts.push(format!("[media: {}]", media_s));
+    }
+    parts.join(" ")
+}
+
+async fn maybe_send_sticker_reply(
+    bot: &Bot,
+    chat_id: ChatId,
+    db: &Database,
+    chat_states: &SharedChatStates,
+) {
+    let state = get_chat_state(chat_states, chat_id).await;
+
+    // Adjust probability based on mood
+    let base_chance = STICKER_REPLY_CHANCE;
+    let adjusted_chance = match state.mood {
+        crate::state::MomoMood::Playful => base_chance * 1.5, // More likely when playful
+        crate::state::MomoMood::Annoyed => base_chance * 0.5, // Less likely when annoyed
+        crate::state::MomoMood::Busy => 0.0,                  // Never when busy
+        crate::state::MomoMood::Normal => base_chance,
+    };
+
+    let adjusted_chance = adjusted_chance.min(1.0); // Cap at 1.0
+
+    if rand::random::<f64>() > adjusted_chance {
+        return;
+    }
+
+    if let Ok(Some(sticker_id)) = db.random_sticker(chat_id.0).await {
+        if let Err(err) = bot
+            .send_sticker(chat_id, InputFile::file_id(sticker_id))
+            .await
+        {
+            log::warn!("*sticker send failed* chat {}: {}", chat_id, err);
+        } else {
+            log::debug!("*sticker sent* chat {} (mood: {:?})", chat_id, state.mood);
+        }
+    }
+}
+
+fn truncate_for_context(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let truncated: String = text.chars().take(max).collect();
+        format!("{}…", truncated)
     }
 }

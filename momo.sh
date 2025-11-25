@@ -14,6 +14,50 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+PID_FILE="$SCRIPT_DIR/momo.pid"
+LOG_FILE="$SCRIPT_DIR/momo.log"
+
+join_by() {
+    local IFS="$1"; shift; echo "$*"
+}
+
+read_pidfile() {
+    if [ -f "$PID_FILE" ]; then
+        tr -cd '0-9\n ' < "$PID_FILE" | head -n1 | xargs
+    fi
+}
+
+running_pids() {
+    local pids=()
+    local pid_from_file
+    pid_from_file=$(read_pidfile)
+    if [ -n "$pid_from_file" ] && kill -0 "$pid_from_file" >/dev/null 2>&1; then
+        pids+=("$pid_from_file")
+    fi
+
+    # Prefer exact process name match to skip wrapper shells
+    while IFS= read -r p; do
+        if [ -n "$p" ] && kill -0 "$p" >/dev/null 2>&1; then
+            if [[ ! " ${pids[*]} " =~ " ${p} " ]]; then
+                pids+=("$p")
+            fi
+        fi
+    done < <(pgrep -x momo-bot 2>/dev/null || true)
+
+    # Legacy fallback only if none found yet
+    if [ ${#pids[@]} -eq 0 ]; then
+        while IFS= read -r p; do
+            if [ -n "$p" ] && kill -0 "$p" >/dev/null 2>&1; then
+                if [[ ! " ${pids[*]} " =~ " ${p} " ]]; then
+                    pids+=("$p")
+                fi
+            fi
+        done < <(pgrep -f "target/release/momo-bot" 2>/dev/null || true)
+    fi
+
+    echo "${pids[@]}"
+}
+
 print_header() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}  😼 Momo Bot v2.0 - $1${NC}"
@@ -118,55 +162,68 @@ cmd_run() {
     ./target/release/momo-bot
 }
 
-# Run with logs
-cmd_run_dev() {
-    print_header "Running Momo Bot (Development)"
+# Run the bot in the background with logs and PID tracking
+cmd_start() {
+    print_header "Starting Momo Bot (background)"
     check_env
 
-    echo "Starting bot with cargo run..."
-    echo ""
-    RUST_LOG=info cargo run
+    if [ ! -f "target/release/momo-bot" ]; then
+        print_warning "Release binary not found. Building first..."
+        cmd_build
+    fi
+
+    local pids
+    pids=$(running_pids)
+    if [ -n "$pids" ]; then
+        print_warning "Bot already running with PID(s): $pids. Use restart or stop."
+        exit 0
+    fi
+
+    echo "Launching..."
+    nohup ./target/release/momo-bot >> "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    print_success "Started (PID $(cat "$PID_FILE")). Logs: $LOG_FILE"
 }
 
-# Check and build
-cmd_full() {
-    print_header "Full Check & Build"
+cmd_stop() {
+    print_header "Stopping Momo Bot"
+    local pids
+    pids=$(running_pids)
+    if [ -z "$pids" ]; then
+        print_warning "Bot not running."
+        rm -f "$PID_FILE"
+        return
+    fi
 
-    echo "Step 1: Checking code..."
-    cargo check
-    print_success "Check passed!"
-
-    echo ""
-    echo "Step 2: Clean build..."
-    cargo clean
-    print_success "Cleaned"
-
-    echo ""
-    echo "Step 3: Building release..."
-    cargo build --release
-    print_success "Build complete!"
-
-    echo ""
-    print_success "All done! Ready to run."
+    # shellcheck disable=SC2086
+    kill $pids
+    rm -f "$PID_FILE"
+    print_success "Bot stopped (PID $(join_by ' ' $pids))."
 }
 
-# Run tests
-cmd_test() {
-    print_header "Running Tests"
-    cargo test
+cmd_restart() {
+    print_header "Restarting Momo Bot"
+    cmd_stop
+    cmd_start
 }
 
-# Format code
-cmd_fmt() {
-    print_header "Formatting Code"
-    cargo fmt
-    print_success "Code formatted!"
+cmd_status() {
+    local pids
+    pids=$(running_pids)
+    if [ -n "$pids" ]; then
+        print_success "Bot running (PID $(join_by ' ' $pids))."
+    else
+        print_warning "Bot is not running."
+    fi
 }
 
-# Clippy lints
-cmd_lint() {
-    print_header "Running Clippy"
-    cargo clippy -- -D warnings
+cmd_logs() {
+    print_header "Latest Logs"
+    if [ -f "$LOG_FILE" ]; then
+        tail -n 80 "$LOG_FILE"
+    else
+        print_warning "Log file not found at $LOG_FILE"
+    fi
 }
 
 # Show help
@@ -179,12 +236,16 @@ cmd_help() {
     echo "  ./momo.sh [command]"
     echo ""
     echo -e "${GREEN}Commands:${NC}"
-    echo -e "  ${YELLOW}check${NC}       Quick check (cargo check)"
     echo -e "  ${YELLOW}build${NC}       Clean build with no cache (release)"
-    echo -e "  ${YELLOW}dev${NC}         Quick development build (debug)"
-    echo -e "  ${YELLOW}run${NC}         Run the bot (builds if needed, reads .env)"
-    echo -e "  ${YELLOW}run-dev${NC}     Run with cargo run (development mode, reads .env)"
-    echo -e "  ${YELLOW}full${NC}        Full check + clean + build pipeline"
+    echo -e "  ${YELLOW}run${NC}         Run the bot in the foreground (reads .env)"
+    echo -e "  ${YELLOW}start${NC}       Start in background with logs & PID"
+    echo -e "  ${YELLOW}stop${NC}        Stop background bot"
+    echo -e "  ${YELLOW}restart${NC}     Restart background bot"
+    echo -e "  ${YELLOW}status${NC}      Show running status"
+    echo -e "  ${YELLOW}logs${NC}        Tail the latest logs"
+    echo -e "  ${YELLOW}check${NC}       Quick check (cargo check)"
+    echo ""
+    echo -e "${GREEN}Developer helpers:${NC}"
     echo -e "  ${YELLOW}test${NC}        Run tests"
     echo -e "  ${YELLOW}fmt${NC}         Format code with rustfmt"
     echo -e "  ${YELLOW}lint${NC}        Run clippy lints"
@@ -203,10 +264,11 @@ cmd_help() {
     echo "    export TELOXIDE_TOKEN='your-token'"
     echo ""
     echo -e "${GREEN}Examples:${NC}"
-    echo "  ./momo.sh check           # Quick validation"
-    echo "  ./momo.sh full            # Complete rebuild from scratch"
-    echo "  ./momo.sh run             # Start the bot (loads .env)"
-    echo "  ./momo.sh run-dev         # Start with detailed logs"
+    echo "  ./momo.sh build           # Clean release build"
+    echo "  ./momo.sh start           # Start in background (uses .env, writes logs)"
+    echo "  ./momo.sh status          # Show running status"
+    echo "  ./momo.sh logs            # Tail recent logs"
+    echo "  ./momo.sh restart         # Restart background bot"
     echo ""
     echo -e "${GREEN}Configuration:${NC}"
     echo "  Edit src/config.rs to tune behavior rates and timings"
@@ -222,23 +284,26 @@ main() {
     fi
 
     case "$1" in
-        check)
-            cmd_check
-            ;;
         build)
             cmd_build
-            ;;
-        dev)
-            cmd_dev
             ;;
         run)
             cmd_run
             ;;
-        run-dev)
-            cmd_run_dev
+        start)
+            cmd_start
             ;;
-        full)
-            cmd_full
+        stop)
+            cmd_stop
+            ;;
+        restart)
+            cmd_restart
+            ;;
+        status)
+            cmd_status
+            ;;
+        check)
+            cmd_check
             ;;
         test)
             cmd_test
@@ -248,6 +313,9 @@ main() {
             ;;
         lint)
             cmd_lint
+            ;;
+        logs)
+            cmd_logs
             ;;
         help|--help|-h)
             cmd_help

@@ -10,8 +10,9 @@ An AI-powered Telegram chatbot embodying Momo, a calico cat with a tsundere hack
 - **Proactive Engagement**: Randomly initiates conversations in groups (~7.5% per message when allowed), cooling down if Telegram forbids sending
 - **Smart Mentions**: Tags active members to start interesting discussions
 - **Cat Bait Pounces**: Low chance to react to shrimp/treat keywords even without a mention
+- **Sticker-Savvy**: Understands stickers/photos (stores text descriptions) and can reply with stickers it has seen
 - **Model-Flexible**: Swap Grok models (e.g., grok-4.1-fast) via env vars without code changes
-- **Deeper Memory**: Longer chat history + group recap context so Momo remembers more of the thread
+- **Deeper Memory**: SQLite-backed history + longer chat context so Momo remembers more of the thread
 - **Unique Personality**: Tsundere calico cat with hacker/geek vibes
 - **Multi-Language**: Auto-responds in Chinese or English matching your input
 - **Context Memory**: Remembers conversation history per chat (groups, channels, private)
@@ -206,7 +207,7 @@ momo-bot/
 
 - **Never commit** your `.env` file
 - Monitor API costs at [console.x.ai](https://console.x.ai/)
-- Conversation history is in-memory (lost on restart)
+- Conversation history now persists in SQLite (`MOMO_DB_PATH`, default `momo.db`)
 - Respect Grok API rate limits
 - Telegram may forbid sending in some chats (e.g., bot lacks permission or user blocked it); proactive chatter auto-pauses for ~1h after a forbidden send. Grant send rights or interact with the bot directly to resume sooner.
 - Web search is enabled by default; set `GROK_ENABLE_SEARCH=false` in `.env` to disable.
