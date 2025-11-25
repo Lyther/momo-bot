@@ -139,12 +139,56 @@ impl Database {
         Ok(rows)
     }
 
+    /// Get a random sticker from this chat
     pub async fn random_sticker(&self, chat_id: i64) -> Result<Option<String>> {
         let row: Option<String> = self
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT media_ref FROM messages WHERE chat_id = ?1 AND media_type = 'sticker' AND media_ref IS NOT NULL ORDER BY RANDOM() LIMIT 1",
+                )?;
+                let mut iter = stmt.query([chat_id])?;
+                if let Some(row) = iter.next()? {
+                    let val: Option<String> = row.get(0)?;
+                    Ok(val)
+                } else {
+                    Ok(None)
+                }
+            })
+            .await?;
+        Ok(row)
+    }
+
+    /// Get a random sticker matching an emoji pattern (for contextual sticker replies)
+    pub async fn sticker_by_emoji(&self, chat_id: i64, emoji: &str) -> Result<Option<String>> {
+        let emoji = emoji.to_string();
+        let row: Option<String> = self
+            .conn
+            .call(move |conn| {
+                // Search for stickers where the summary contains the emoji
+                let mut stmt = conn.prepare(
+                    "SELECT media_ref FROM messages WHERE chat_id = ?1 AND media_type = 'sticker' AND media_ref IS NOT NULL AND summary LIKE ?2 ORDER BY RANDOM() LIMIT 1",
+                )?;
+                let pattern = format!("%{}%", emoji);
+                let mut iter = stmt.query(rusqlite::params![chat_id, pattern])?;
+                if let Some(row) = iter.next()? {
+                    let val: Option<String> = row.get(0)?;
+                    Ok(val)
+                } else {
+                    Ok(None)
+                }
+            })
+            .await?;
+        Ok(row)
+    }
+
+    /// Get a random photo file_id from this chat (for sending cached photos)
+    pub async fn random_photo(&self, chat_id: i64) -> Result<Option<String>> {
+        let row: Option<String> = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT media_ref FROM messages WHERE chat_id = ?1 AND media_type = 'photo' AND media_ref IS NOT NULL ORDER BY RANDOM() LIMIT 1",
                 )?;
                 let mut iter = stmt.query([chat_id])?;
                 if let Some(row) = iter.next()? {
@@ -209,7 +253,7 @@ impl Database {
         }))
     }
 
-    /// Set image description (for future AI-generated descriptions)
+    /// Set image description (for context optimization - stores AI-generated description)
     pub async fn set_image_description(&self, file_id: &str, description: &str) -> Result<()> {
         let file_id = file_id.to_string();
         let description = description.to_string();
@@ -226,15 +270,53 @@ impl Database {
         Ok(())
     }
 
+    /// Check if an image has a description (for context optimization)
+    pub async fn image_needs_description(&self, file_id: &str) -> Result<bool> {
+        let file_id = file_id.to_string();
+        let needs: Option<bool> = self
+            .conn
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare("SELECT description IS NULL FROM image_cache WHERE file_id = ?1")?;
+                let mut rows = stmt.query([file_id])?;
+                if let Some(row) = rows.next()? {
+                    Ok(Some(row.get::<_, bool>(0)?))
+                } else {
+                    Ok(None) // Not cached
+                }
+            })
+            .await?;
+        Ok(needs.unwrap_or(false))
+    }
+
+    /// Cleanup old cache entries (keep last N days)
+    #[allow(dead_code)] // For periodic maintenance
+    pub async fn cleanup_old_cache(&self, max_age_days: i64) -> Result<usize> {
+        let cutoff = Utc::now().timestamp() - (max_age_days * 24 * 60 * 60);
+        let deleted: usize = self
+            .conn
+            .call(move |conn| {
+                let count =
+                    conn.execute("DELETE FROM image_cache WHERE created_at < ?1", [cutoff])?;
+                Ok(count)
+            })
+            .await?;
+        if deleted > 0 {
+            log::info!("*cache cleanup* removed {} old image entries", deleted);
+        }
+        Ok(deleted)
+    }
+
     /// Cleanup orphaned cache files (stub - implement if needed)
     pub async fn cleanup_orphaned_cache(&self, _cache_dir: &std::path::Path) -> Result<()> {
-        // TODO: Implement cache cleanup logic if needed
+        // No-op: we use SQLite storage, not filesystem cache
         Ok(())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct CachedImage {
+    #[allow(dead_code)] // For validation/logging
     pub mime_type: String,
     pub data_url: String,
     pub description: Option<String>,

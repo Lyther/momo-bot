@@ -292,6 +292,46 @@ impl GrokClient {
             .await
     }
 
+    /// Generate a brief description of an image for context optimization
+    /// This description is stored and used instead of full image data in conversation history
+    pub async fn describe_image(&self, data_url: &str) -> Result<String> {
+        if !self.config.enable_multimodal {
+            anyhow::bail!("Multimodal not enabled");
+        }
+
+        let messages = vec![
+            Message::text(
+                "system",
+                "You are a concise image describer. Describe the image in 1-2 short sentences focusing on the main subject and any text visible. Be factual and brief.",
+            ),
+            Message {
+                role: "user".to_string(),
+                content: Content::Parts(vec![
+                    ContentPart::Text {
+                        text: "Describe this image briefly:".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: data_url.to_string(),
+                            detail: Some("low".to_string()), // Use low detail for description
+                        },
+                    },
+                ]),
+            },
+        ];
+
+        let request = GrokRequest {
+            model: self.config.chat_model.clone(),
+            messages,
+            temperature: 0.3, // Lower temperature for factual descriptions
+            max_tokens: 100,  // Keep descriptions short
+            stream: None,
+            search: None,
+        };
+
+        self.send_request(request).await
+    }
+
     /// Internal helper to generate with a prompt
     async fn generate_with_prompt(
         &self,

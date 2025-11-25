@@ -6,11 +6,13 @@ An AI-powered Telegram chatbot embodying Momo, a calico cat with a tsundere hack
 
 - **AI-Powered**: Uses Grok 4 for intelligent, context-aware conversations
 - **Web-Aware**: Internet search enabled by default - can discuss latest news and trends! 🌐
-- **Multimodal Snark**: If Grok supports it, Momo will react to photos with hacker-cat commentary
+- **Multimodal Vision**: Reads photos and static stickers (JPEG, PNG, WebP) - converts to base64 data URLs for Grok API compatibility
 - **Proactive Engagement**: Randomly initiates conversations in groups (~7.5% per message when allowed), cooling down if Telegram forbids sending
 - **Smart Mentions**: Tags active members to start interesting discussions
 - **Cat Bait Pounces**: Low chance to react to shrimp/treat keywords even without a mention
-- **Sticker-Savvy**: Understands stickers/photos (stores text descriptions) and can reply with stickers it has seen
+- **Sticker-Savvy**: Processes static stickers as images, can reply with stickers or photos (mood-aware probability: more in playful mode, less when annoyed)
+- **Image Caching**: Downloads and caches images in SQLite with auto-generated descriptions for context optimization
+- **Context Optimization**: Generates brief image descriptions to use in conversation history, saving tokens and improving context quality
 - **Model-Flexible**: Swap Grok models (e.g., grok-4.1-fast) via env vars without code changes
 - **Deeper Memory**: SQLite-backed history + longer chat context so Momo remembers more of the thread
 - **Unique Personality**: Tsundere calico cat with hacker/geek vibes
@@ -88,7 +90,7 @@ Momo responds when:
 - **Randomly** - ~7.5% chance to respond on group messages when the bot has send permissions
 
 Momo also has a tiny chance to pounce on shrimp/treat keywords (🍤 cat bait) even without a mention—keep snacks handy.
-Photos/captions are fair game: if Grok's multimodal endpoint is available, Momo will describe the image with tsundere flair.
+Photos and static stickers are automatically processed: Momo downloads them, detects format via magic bytes (handling Telegram's `application/octet-stream` quirk), converts to base64 data URLs, and sends to Grok for analysis. Reply to a photo when mentioning Momo and she'll see it too.
 Context is beefier now: ~80-turn history plus a recap of ~40 recent group lines are fed into Grok for more coherent replies.
 
 Each chat maintains its own conversation context!
@@ -134,6 +136,8 @@ Momo: *malicious interrupt* Tch. Weather matrix corrupted. I stay inside, unlike
 **Creativity**: Adjust `temperature` (0.0-1.0) in `src/grok.rs` (line 80 for regular chats, line 139 for proactive messages)
 
 **Random Response Rate**: Tweak `ACTIVE_MESSAGE_CHANCE` in `src/config.rs` (defaults to ~7.5%). Cat bait odds live in `CAT_BAIT_RESPONSE_CHANCE`; proactive cooldown after Telegram forbids sends is `PROACTIVE_BLOCK_COOLDOWN_SECS`.
+
+**Media Replies**: `STICKER_REPLY_CHANCE` controls how often Momo sends stickers/photos after responding (default 15%). `PHOTO_VS_STICKER_CHANCE` sets the ratio of photos vs stickers (default 20% photos). `GENERATE_IMAGE_DESCRIPTIONS` enables auto-description generation for context optimization.
 
 **Models & Features**: `.env` supports `GROK_MODEL`, `GROK_MODEL_PROACTIVE`, `GROK_ENABLE_SEARCH`, `GROK_ENABLE_MULTIMODAL`, `GROK_MAX_TOKENS` to switch models (e.g., `grok-4.1` / `grok-4.1-mini` per xAI docs) and toggle search/multimodal.
 
@@ -190,9 +194,18 @@ CMD ["momo-bot"]
 ```tree
 momo-bot/
 ├── src/
-│   ├── main.rs         # Bot logic and message handling
-│   └── grok.rs         # Grok API client with personality prompt
+│   ├── main.rs         # Entry point, bot initialization
+│   ├── chat/
+│   │   ├── handler.rs  # Message handling, media processing
+│   │   ├── active.rs   # Proactive message generation
+│   │   └── passive.rs  # Mention/keyword detection
+│   ├── grok.rs         # Grok API client with personality prompt
+│   ├── media.rs        # Image download, format detection, base64 conversion
+│   ├── db.rs           # SQLite database (messages, image cache)
+│   ├── state.rs        # Chat state and mood management
+│   └── config.rs       # Configuration constants
 ├── Cargo.toml          # Dependencies
+├── momo.db             # SQLite database (auto-created)
 └── .env                # API keys (create from env.example)
 ```
 
@@ -211,7 +224,10 @@ momo-bot/
 - Respect Grok API rate limits
 - Telegram may forbid sending in some chats (e.g., bot lacks permission or user blocked it); proactive chatter auto-pauses for ~1h after a forbidden send. Grant send rights or interact with the bot directly to resume sooner.
 - Web search is enabled by default; set `GROK_ENABLE_SEARCH=false` in `.env` to disable.
-- Multimodal replies use temporary Telegram file URLs; keep Grok image support enabled for photo replies.
+- **Image Processing**: Images are downloaded, format-detected via magic bytes (handles Telegram's `application/octet-stream`), converted to base64 data URLs, and cached in SQLite. This bypasses Grok's URL content-type checks and speeds up repeated images.
+- **Context Optimization**: After processing an image, Momo generates a brief description in the background. These descriptions are used in conversation history instead of full image data, saving API tokens and improving context quality.
+- Grok only supports JPEG, PNG, and WebP - animated stickers and videos are automatically skipped.
+- Momo can reply with stickers and photos from the chat history (mood-aware: more likely when playful, less when annoyed).
 
 ## 📝 License
 

@@ -7,8 +7,9 @@ use teloxide::types::{ChatAction, InputFile, Message, MessageId};
 
 use crate::commands::handle_command;
 use crate::config::{
-    ACTIVE_MESSAGE_CHANCE, CAT_BAIT_RESPONSE_CHANCE, DB_CONTEXT_SUMMARIES, GROUP_CONTEXT_MESSAGES,
-    MAX_CONVERSATION_HISTORY, MAX_MEDIA_ATTACHMENTS, PROACTIVE_BLOCK_COOLDOWN_SECS,
+    ACTIVE_MESSAGE_CHANCE, CAT_BAIT_RESPONSE_CHANCE, DB_CONTEXT_SUMMARIES,
+    GENERATE_IMAGE_DESCRIPTIONS, GROUP_CONTEXT_MESSAGES, MAX_CONVERSATION_HISTORY,
+    MAX_MEDIA_ATTACHMENTS, PHOTO_VS_STICKER_CHANCE, PROACTIVE_BLOCK_COOLDOWN_SECS,
     STICKER_REPLY_CHANCE,
 };
 use crate::db::{Database, DbEntry};
@@ -208,7 +209,7 @@ pub async fn handle_message(
                 handle_send_error(chat_id, &err, &chat_states).await;
             } else {
                 clear_proactive_block(&chat_states, chat_id).await;
-                maybe_send_sticker_reply(&bot, chat_id, db.as_ref(), &chat_states).await;
+                maybe_send_media_reply(&bot, chat_id, db.as_ref(), &chat_states, None).await;
             }
         }
         return Ok(());
@@ -346,7 +347,22 @@ pub async fn handle_message(
                 handle_send_error(chat_id, &err, &chat_states).await;
             } else {
                 clear_proactive_block(&chat_states, chat_id).await;
-                maybe_send_sticker_reply(&bot, chat_id, db.as_ref(), &chat_states).await;
+                maybe_send_media_reply(&bot, chat_id, db.as_ref(), &chat_states, None).await;
+
+                // Spawn background tasks to generate image descriptions for context optimization
+                for (file_id, data_url) in current_media
+                    .attachment_file_ids
+                    .iter()
+                    .zip(current_media.attachment_data_urls.iter())
+                {
+                    let grok = grok_client.clone();
+                    let db_clone = db.clone();
+                    let file_id = file_id.clone();
+                    let data_url = data_url.clone();
+                    tokio::spawn(async move {
+                        generate_image_description(grok, db_clone, file_id, data_url).await;
+                    });
+                }
             }
         }
         Err(e) => {
@@ -370,6 +386,7 @@ pub async fn handle_message(
 struct MediaCapture {
     attachments: Vec<ContentPart>,
     attachment_file_ids: Vec<String>, // Track file_ids for cache lookups
+    attachment_data_urls: Vec<String>, // Track data URLs for description generation
     media_type: Option<String>,
     media_ref: Option<String>,
     summary: Option<String>,
@@ -396,8 +413,11 @@ async fn extract_text_and_media(
 
         let is_raster = !sticker.is_animated() && !sticker.is_video();
         if allow_multimodal && allow_media && is_raster {
-            if let Some(part) = build_image_attachment(bot, &sticker.file.id, db).await {
+            if let Some((part, data_url, _needs_desc)) =
+                build_image_attachment(bot, &sticker.file.id, db).await
+            {
                 media.attachment_file_ids.push(sticker.file.id.clone());
+                media.attachment_data_urls.push(data_url);
                 media.attachments.push(part);
             }
         }
@@ -409,8 +429,11 @@ async fn extract_text_and_media(
             media.media_type = Some("photo".to_string());
             media.media_ref = Some(best.file.id.clone());
             if allow_multimodal && allow_media {
-                if let Some(part) = build_image_attachment(bot, &best.file.id, db).await {
+                if let Some((part, data_url, _needs_desc)) =
+                    build_image_attachment(bot, &best.file.id, db).await
+                {
                     media.attachment_file_ids.push(best.file.id.clone());
+                    media.attachment_data_urls.push(data_url);
                     media.attachments.push(part);
                 }
             }
@@ -438,16 +461,26 @@ async fn extract_text_and_media(
     Some((text, media))
 }
 
-async fn build_image_attachment(bot: &Bot, file_id: &str, db: &Database) -> Option<ContentPart> {
+/// Returns (ContentPart, data_url, needs_description)
+async fn build_image_attachment(
+    bot: &Bot,
+    file_id: &str,
+    db: &Database,
+) -> Option<(ContentPart, String, bool)> {
     // Check cache first
     if let Ok(Some(cached)) = db.get_cached_image(file_id).await {
         log::debug!("*image cache hit* file_id: {}", file_id);
-        return Some(ContentPart::ImageUrl {
-            image_url: ImageUrl {
-                url: cached.data_url,
-                detail: Some("high".to_string()),
+        let needs_desc = cached.description.is_none();
+        return Some((
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: cached.data_url.clone(),
+                    detail: Some("high".to_string()),
+                },
             },
-        });
+            cached.data_url,
+            needs_desc,
+        ));
     }
 
     // Download and convert to data URL
@@ -471,12 +504,16 @@ async fn build_image_attachment(bot: &Bot, file_id: &str, db: &Database) -> Opti
         &data_url[..data_url.len().min(60)]
     );
 
-    Some(ContentPart::ImageUrl {
-        image_url: ImageUrl {
-            url: data_url,
-            detail: Some("high".to_string()),
+    Some((
+        ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: data_url.clone(),
+                detail: Some("high".to_string()),
+            },
         },
-    })
+        data_url,
+        true, // Newly processed, needs description
+    ))
 }
 
 fn contains_cat_bait(text: &str) -> bool {
@@ -583,11 +620,12 @@ fn build_db_summary(
     parts.join(" ")
 }
 
-async fn maybe_send_sticker_reply(
+async fn maybe_send_media_reply(
     bot: &Bot,
     chat_id: ChatId,
     db: &Database,
     chat_states: &SharedChatStates,
+    context_emoji: Option<&str>,
 ) {
     let state = get_chat_state(chat_states, chat_id).await;
 
@@ -606,6 +644,42 @@ async fn maybe_send_sticker_reply(
         return;
     }
 
+    // Decide: send photo or sticker?
+    let send_photo = rand::random::<f64>() < PHOTO_VS_STICKER_CHANCE;
+
+    if send_photo {
+        // Try to send a random photo from this chat
+        if let Ok(Some(photo_id)) = db.random_photo(chat_id.0).await {
+            if let Err(err) = bot.send_photo(chat_id, InputFile::file_id(photo_id)).await {
+                log::warn!("*photo send failed* chat {}: {}", chat_id, err);
+            } else {
+                log::debug!("*photo sent* chat {} (mood: {:?})", chat_id, state.mood);
+                return;
+            }
+        }
+    }
+
+    // Try contextual sticker first (matching emoji)
+    if let Some(emoji) = context_emoji {
+        if let Ok(Some(sticker_id)) = db.sticker_by_emoji(chat_id.0, emoji).await {
+            if let Err(err) = bot
+                .send_sticker(chat_id, InputFile::file_id(sticker_id))
+                .await
+            {
+                log::warn!("*sticker send failed* chat {}: {}", chat_id, err);
+            } else {
+                log::debug!(
+                    "*contextual sticker sent* chat {} emoji: {} (mood: {:?})",
+                    chat_id,
+                    emoji,
+                    state.mood
+                );
+                return;
+            }
+        }
+    }
+
+    // Fallback to random sticker
     if let Ok(Some(sticker_id)) = db.random_sticker(chat_id.0).await {
         if let Err(err) = bot
             .send_sticker(chat_id, InputFile::file_id(sticker_id))
@@ -614,6 +688,43 @@ async fn maybe_send_sticker_reply(
             log::warn!("*sticker send failed* chat {}: {}", chat_id, err);
         } else {
             log::debug!("*sticker sent* chat {} (mood: {:?})", chat_id, state.mood);
+        }
+    }
+}
+
+/// Generate image description in background for context optimization
+async fn generate_image_description(
+    grok_client: Arc<GrokClient>,
+    db: SharedDb,
+    file_id: String,
+    data_url: String,
+) {
+    if !GENERATE_IMAGE_DESCRIPTIONS {
+        return;
+    }
+
+    // Check if description already exists
+    match db.image_needs_description(&file_id).await {
+        Ok(true) => {}
+        Ok(false) => return, // Already has description or not cached
+        Err(e) => {
+            log::warn!("*description check failed* {}: {}", file_id, e);
+            return;
+        }
+    }
+
+    // Generate description
+    match grok_client.describe_image(&data_url).await {
+        Ok(description) => {
+            let description = description.trim();
+            if let Err(e) = db.set_image_description(&file_id, description).await {
+                log::warn!("*description save failed* {}: {}", file_id, e);
+            } else {
+                log::debug!("*image described* {}: {}", file_id, description);
+            }
+        }
+        Err(e) => {
+            log::debug!("*description generation failed* {}: {}", file_id, e);
         }
     }
 }

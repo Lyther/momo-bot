@@ -59,6 +59,10 @@ pub const PROACTIVE_BLOCK_COOLDOWN_SECS: u64 = 3600; // 1 hour
 pub const CAT_BAIT_RESPONSE_CHANCE: f64 = 0.2;
 /// Chance to send a sticker along with a text reply if we have one stored
 pub const STICKER_REPLY_CHANCE: f64 = 0.15;
+/// Chance to send a photo instead of sticker (when sending media)
+pub const PHOTO_VS_STICKER_CHANCE: f64 = 0.2;
+/// Whether to generate image descriptions for context optimization
+pub const GENERATE_IMAGE_DESCRIPTIONS: bool = true;
 
 /// Grok API configuration
 pub const GROK_API_URL: &str = "https://api.x.ai/v1/chat/completions";
