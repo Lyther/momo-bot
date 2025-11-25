@@ -1,5 +1,4 @@
 /// Bot state management - tracking Momo's moods and modes
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,8 +22,8 @@ impl MomoMood {
     /// Get typical duration for this mood
     pub fn duration(&self) -> Duration {
         match self {
-            MomoMood::Normal => Duration::from_secs(0), // No timer
-            MomoMood::Busy => Duration::from_secs(180), // 3 minutes
+            MomoMood::Normal => Duration::from_secs(0),    // No timer
+            MomoMood::Busy => Duration::from_secs(180),    // 3 minutes
             MomoMood::Playful => Duration::from_secs(120), // 2 minutes
             MomoMood::Annoyed => Duration::from_secs(300), // 5 minutes
         }
@@ -38,6 +37,7 @@ pub struct ChatState {
     pub mood_expires_at: Option<Instant>,
     pub last_proactive_time: Option<Instant>,
     pub next_proactive_time: Option<Instant>,
+    pub proactive_blocked_until: Option<Instant>,
 }
 
 impl ChatState {
@@ -47,12 +47,13 @@ impl ChatState {
             mood_expires_at: None,
             last_proactive_time: None,
             next_proactive_time: None,
+            proactive_blocked_until: None,
         }
     }
 
     /// Generate a random interval between MIN and MAX time
     fn random_proactive_interval() -> Duration {
-        use crate::config::{MIN_TIME_BETWEEN_PROACTIVE, MAX_TIME_BETWEEN_PROACTIVE};
+        use crate::config::{MAX_TIME_BETWEEN_PROACTIVE, MIN_TIME_BETWEEN_PROACTIVE};
         let min = MIN_TIME_BETWEEN_PROACTIVE;
         let max = MAX_TIME_BETWEEN_PROACTIVE;
         let range = max - min;
@@ -67,7 +68,11 @@ impl ChatState {
 
         let hours = interval.as_secs() / 3600;
         let minutes = (interval.as_secs() % 3600) / 60;
-        log::info!("*proactive scheduled* Next time-based message in {}h {}m", hours, minutes);
+        log::info!(
+            "*proactive scheduled* Next time-based message in {}h {}m",
+            hours,
+            minutes
+        );
     }
 
     /// Check if mood has expired and reset to normal
@@ -76,6 +81,13 @@ impl ChatState {
             if Instant::now() >= expires_at {
                 self.mood = MomoMood::Normal;
                 self.mood_expires_at = None;
+            }
+        }
+
+        // Reset proactive block once the cooldown passes
+        if let Some(until) = self.proactive_blocked_until {
+            if Instant::now() >= until {
+                self.proactive_blocked_until = None;
             }
         }
     }
@@ -97,6 +109,18 @@ impl ChatState {
             MomoMood::Normal | MomoMood::Playful | MomoMood::Annoyed => true,
             MomoMood::Busy => false,
         }
+    }
+
+    /// Whether proactive behavior is temporarily blocked due to Telegram rejections
+    pub fn is_proactive_blocked(&self) -> bool {
+        self.proactive_blocked_until
+            .map(|until| Instant::now() < until)
+            .unwrap_or(false)
+    }
+
+    /// Block proactive behaviors for a duration
+    pub fn block_proactive_for(&mut self, duration: Duration) {
+        self.proactive_blocked_until = Some(Instant::now() + duration);
     }
 }
 
@@ -122,4 +146,20 @@ pub async fn set_chat_mood(states: &SharedChatStates, chat_id: ChatId, mood: Mom
     let mut state = get_chat_state(states, chat_id).await;
     state.set_mood(mood);
     update_chat_state(states, chat_id, state).await;
+}
+
+/// Pause proactive behaviors for a chat (e.g., when Telegram forbids sending)
+pub async fn pause_proactive(states: &SharedChatStates, chat_id: ChatId, duration: Duration) {
+    let mut state = get_chat_state(states, chat_id).await;
+    state.block_proactive_for(duration);
+    update_chat_state(states, chat_id, state).await;
+}
+
+/// Clear a proactive block once we've successfully sent messages again
+pub async fn clear_proactive_block(states: &SharedChatStates, chat_id: ChatId) {
+    let mut state = get_chat_state(states, chat_id).await;
+    if state.proactive_blocked_until.is_some() {
+        state.proactive_blocked_until = None;
+        update_chat_state(states, chat_id, state).await;
+    }
 }

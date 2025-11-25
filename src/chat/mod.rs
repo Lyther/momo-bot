@@ -1,5 +1,4 @@
 /// Chat handling module
-
 pub mod active;
 pub mod handler;
 pub mod passive;

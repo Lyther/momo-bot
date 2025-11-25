@@ -1,5 +1,4 @@
 /// Active/proactive chat features - Momo initiating conversations
-
 use std::sync::Arc;
 use std::time::Instant;
 use teloxide::prelude::*;
@@ -86,10 +85,7 @@ fn select_proactive_behavior(is_time_based: bool) -> ProactiveBehavior {
 }
 
 /// Check if it's time for time-based proactive behavior
-async fn should_do_time_based_proactive(
-    chat_states: &SharedChatStates,
-    chat_id: ChatId,
-) -> bool {
+async fn should_do_time_based_proactive(chat_states: &SharedChatStates, chat_id: ChatId) -> bool {
     let mut state = get_chat_state(chat_states, chat_id).await;
 
     // If no next time scheduled, schedule one and return false (wait for next time)
@@ -124,6 +120,10 @@ pub async fn generate_proactive_message(
         log::debug!("*mood block* Momo is busy, skipping proactive message");
         return None;
     }
+    if state.is_proactive_blocked() {
+        log::warn!("*proactive blocked* Skipping proactive message in chat {} until Telegram allows sending again", chat_id);
+        return None;
+    }
 
     // Check if we should do time-based proactive
     let is_time_based = should_do_time_based_proactive(&chat_states, chat_id).await;
@@ -132,21 +132,29 @@ pub async fn generate_proactive_message(
     let behavior = select_proactive_behavior(is_time_based);
     log::info!("*proactive behavior selected* {:?}", behavior);
 
-    // Get conversation context
-    let mut context_history = conversation_history.lock().await;
-    let chat_context = context_history.entry(chat_id).or_insert_with(Vec::new);
+    // Get conversation context snapshot without holding the lock across network calls
+    let chat_context = {
+        let context_history = conversation_history.lock().await;
+        context_history.get(&chat_id).cloned().unwrap_or_default()
+    };
 
     // Generate message based on behavior type
     let result = match behavior {
         ProactiveBehavior::NaturalComment => {
-            generate_natural_comment(grok_client, &recent_messages, chat_context, chat_id).await
+            generate_natural_comment(
+                grok_client,
+                &recent_messages,
+                chat_context.as_slice(),
+                chat_id,
+            )
+            .await
         }
 
         ProactiveBehavior::ReplyToMessage => {
             generate_reply_to_message(
                 grok_client,
                 &recent_messages,
-                chat_context,
+                chat_context.as_slice(),
                 chat_id,
                 my_bot_id,
             )
@@ -158,46 +166,61 @@ pub async fn generate_proactive_message(
                 grok_client,
                 &active_members,
                 &recent_messages,
-                chat_context,
+                chat_context.as_slice(),
                 chat_id,
             )
             .await
         }
 
         ProactiveBehavior::BotInteraction => {
-            generate_bot_interaction(grok_client, &chat_bots, chat_context, chat_id, my_bot_id)
-                .await
+            generate_bot_interaction(
+                grok_client,
+                &chat_bots,
+                chat_context.as_slice(),
+                chat_id,
+                my_bot_id,
+            )
+            .await
         }
 
         ProactiveBehavior::TimeRandomStarter => {
-            generate_time_random_starter(grok_client, chat_context).await
+            generate_time_random_starter(grok_client, chat_context.as_slice()).await
         }
 
         ProactiveBehavior::TimeNewsStarter => {
-            generate_time_news_starter(grok_client, &recent_messages, chat_context, chat_id).await
+            generate_time_news_starter(
+                grok_client,
+                &recent_messages,
+                chat_context.as_slice(),
+                chat_id,
+            )
+            .await
         }
 
         ProactiveBehavior::CatBehavior => {
             // Set busy mode
             set_chat_mood(&chat_states, chat_id, MomoMood::Busy).await;
             log::info!("*mood change* Momo is now BUSY (cat behavior)");
-            generate_cat_behavior(grok_client, chat_context).await
+            generate_cat_behavior(grok_client, chat_context.as_slice()).await
         }
 
         ProactiveBehavior::PlayfulMode => {
             // Set playful mode
             set_chat_mood(&chat_states, chat_id, MomoMood::Playful).await;
             log::info!("*mood change* Momo is now PLAYFUL");
-            generate_playful_mode(grok_client, chat_context).await
+            generate_playful_mode(grok_client, chat_context.as_slice()).await
         }
     };
 
     // If we generated a message, add it to history
     if let Some((msg, _reply_to)) = &result {
-        chat_context.push(crate::grok::Message {
-            role: "assistant".to_string(),
-            content: msg.clone(),
-        });
+        let mut context_history = conversation_history.lock().await;
+        let chat_context = context_history.entry(chat_id).or_insert_with(Vec::new);
+        chat_context.push(crate::grok::Message::text("assistant", msg.clone()));
+
+        if chat_context.len() > crate::config::MAX_CONVERSATION_HISTORY {
+            chat_context.drain(0..chat_context.len() - crate::config::MAX_CONVERSATION_HISTORY);
+        }
 
         // Update proactive times for time-based behaviors
         if is_time_based {
@@ -222,7 +245,12 @@ async fn generate_natural_comment(
     chat_context: &[crate::grok::Message],
     chat_id: ChatId,
 ) -> Option<(String, Option<i32>)> {
-    let context = get_recent_context(recent_messages, chat_id, 8).await;
+    let context = get_recent_context(
+        recent_messages,
+        chat_id,
+        crate::config::GROUP_CONTEXT_MESSAGES.min(30),
+    )
+    .await;
     if context.is_empty() {
         return None;
     }
@@ -289,13 +317,8 @@ async fn generate_mention_user(
 
     drop(messages_lock);
 
-    let user_messages = get_user_recent_messages(
-        recent_messages,
-        chat_id,
-        user_id,
-        USER_MESSAGES_TO_JUDGE,
-    )
-    .await;
+    let user_messages =
+        get_user_recent_messages(recent_messages, chat_id, user_id, USER_MESSAGES_TO_JUDGE).await;
 
     if user_messages.is_empty() {
         return None;

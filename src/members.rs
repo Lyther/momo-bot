@@ -1,5 +1,4 @@
 /// Active member tracking module
-
 use std::collections::VecDeque;
 use teloxide::prelude::*;
 use teloxide::types::User;

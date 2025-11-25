@@ -1,5 +1,4 @@
 /// Message and bot tracking module
-
 use std::collections::VecDeque;
 use teloxide::prelude::*;
 use teloxide::types::User;
@@ -54,7 +53,11 @@ pub async fn track_bot(chat_bots: SharedChatBots, chat_id: ChatId, bot_user: &Us
     // Check if already tracked
     if !chat_bot_list.iter().any(|(id, _)| *id == bot_id) {
         chat_bot_list.push((bot_id, bot_username));
-        log::info!("*bot detected* Tracked bot in chat {}: {:?}", chat_id, bot_user.username);
+        log::info!(
+            "*bot detected* Tracked bot in chat {}: {:?}",
+            chat_id,
+            bot_user.username
+        );
     }
 }
 
@@ -149,7 +152,12 @@ pub async fn extract_topic_from_recent(
     recent_messages: &SharedRecentMessages,
     chat_id: ChatId,
 ) -> Option<String> {
-    let context = get_recent_context(recent_messages, chat_id, 5).await;
+    let context = get_recent_context(
+        recent_messages,
+        chat_id,
+        crate::config::GROUP_CONTEXT_MESSAGES.min(20),
+    )
+    .await;
 
     if context.is_empty() {
         return None;

@@ -1,5 +1,4 @@
 /// Utility functions
-
 use teloxide::types::{Chat, ChatKind};
 
 /// Check if a chat is a group or channel (not private)

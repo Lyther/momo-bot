@@ -1,5 +1,4 @@
 /// Shared type definitions
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use teloxide::prelude::*;

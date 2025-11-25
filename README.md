@@ -5,14 +5,18 @@ An AI-powered Telegram chatbot embodying Momo, a calico cat with a tsundere hack
 ## ✨ Features
 
 - **AI-Powered**: Uses Grok 4 for intelligent, context-aware conversations
-- **Web-Aware**: Internet search enabled - can discuss latest news and trends! 🌐
-- **Proactive Engagement**: Randomly initiates conversations in groups (1.5% chance)
+- **Web-Aware**: Internet search enabled by default - can discuss latest news and trends! 🌐
+- **Multimodal Snark**: If Grok supports it, Momo will react to photos with hacker-cat commentary
+- **Proactive Engagement**: Randomly initiates conversations in groups (~7.5% per message when allowed), cooling down if Telegram forbids sending
 - **Smart Mentions**: Tags active members to start interesting discussions
+- **Cat Bait Pounces**: Low chance to react to shrimp/treat keywords even without a mention
+- **Model-Flexible**: Swap Grok models (e.g., grok-4.1-fast) via env vars without code changes
+- **Deeper Memory**: Longer chat history + group recap context so Momo remembers more of the thread
 - **Unique Personality**: Tsundere calico cat with hacker/geek vibes
 - **Multi-Language**: Auto-responds in Chinese or English matching your input
 - **Context Memory**: Remembers conversation history per chat (groups, channels, private)
 - **Group Chat Smart**: Responds when mentioned, replied to, or "momo" is said
-- ****: Randomly chimes in on group conversations (3% chance)
+- **Ambient Quips**: Randomly chimes in on group conversations (configurable)
 
 ## 🎯 Momo's Character
 
@@ -80,7 +84,11 @@ Momo responds when:
 - **@mentioned** - Tag the bot directly
 - **Replied to** - Reply to any of Momo's messages
 - **"momo" mentioned** - Say "momo" anywhere in your message (case-insensitive)
-- **Randomly** - 3% chance to ly respond to any message
+- **Randomly** - ~7.5% chance to respond on group messages when the bot has send permissions
+
+Momo also has a tiny chance to pounce on shrimp/treat keywords (🍤 cat bait) even without a mention—keep snacks handy.
+Photos/captions are fair game: if Grok's multimodal endpoint is available, Momo will describe the image with tsundere flair.
+Context is beefier now: ~80-turn history plus a recap of ~40 recent group lines are fed into Grok for more coherent replies.
 
 Each chat maintains its own conversation context!
 
@@ -124,7 +132,9 @@ Momo: *malicious interrupt* Tch. Weather matrix corrupted. I stay inside, unlike
 
 **Creativity**: Adjust `temperature` (0.0-1.0) in `src/grok.rs` (line 80 for regular chats, line 139 for proactive messages)
 
-**Random Response Rate**: Change `0.03` (3% chance to respond randomly) in `src/main.rs` (line 209), or `ACTIVE_MESSAGE_CHANCE` (1.5% proactive chance) on line 19
+**Random Response Rate**: Tweak `ACTIVE_MESSAGE_CHANCE` in `src/config.rs` (defaults to ~7.5%). Cat bait odds live in `CAT_BAIT_RESPONSE_CHANCE`; proactive cooldown after Telegram forbids sends is `PROACTIVE_BLOCK_COOLDOWN_SECS`.
+
+**Models & Features**: `.env` supports `GROK_MODEL`, `GROK_MODEL_PROACTIVE`, `GROK_ENABLE_SEARCH`, `GROK_ENABLE_MULTIMODAL`, `GROK_MAX_TOKENS` to switch models (e.g., `grok-4.1` / `grok-4.1-mini` per xAI docs) and toggle search/multimodal.
 
 **Commands**: Add handlers in `handle_command()` in `src/main.rs`
 
@@ -198,6 +208,9 @@ momo-bot/
 - Monitor API costs at [console.x.ai](https://console.x.ai/)
 - Conversation history is in-memory (lost on restart)
 - Respect Grok API rate limits
+- Telegram may forbid sending in some chats (e.g., bot lacks permission or user blocked it); proactive chatter auto-pauses for ~1h after a forbidden send. Grant send rights or interact with the bot directly to resume sooner.
+- Web search is enabled by default; set `GROK_ENABLE_SEARCH=false` in `.env` to disable.
+- Multimodal replies use temporary Telegram file URLs; keep Grok image support enabled for photo replies.
 
 ## 📝 License
 
